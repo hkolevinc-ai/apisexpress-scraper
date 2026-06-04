@@ -1,0 +1,25 @@
+name: Scrape ApisExpress catalog
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *" # daily 02:00 Europe/Sofia in summer / 03:00 in winter
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run scraper
+        run: python scraper.py --output apisexpress_products.xlsx
+      - name: Upload Excel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apisexpress-products
+          path: apisexpress_products.xlsx
+          retention-days: 30

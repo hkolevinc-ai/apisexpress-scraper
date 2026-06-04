@@ -1,0 +1,7 @@
+services:
+  apisexpress-scraper:
+    build: .
+    container_name: apisexpress-scraper
+    volumes:
+      - ./data:/data
+    command: python scraper.py --output /data/apisexpress_products.xlsx
