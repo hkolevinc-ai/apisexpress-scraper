@@ -135,65 +135,51 @@ def clean_eur_price(text: str) -> str:
 
 def extract_price_eur(soup: BeautifulSoup, product_jsonld: dict) -> str:
     """
-    Взима крайната видима WooCommerce цена в евро.
-    Ако има намаление, взима <ins> цената.
-    JSON-LD се ползва само като последен fallback.
+    Взима цената само от основния продукт.
+    Ако има намаление, взима намалената цена от <ins>.
     """
 
-    price_box = soup.select_one(
-        ".summary .price, "
-        ".entry-summary .price, "
-        ".single-product-content .price, "
+    main_product = soup.select_one("div[id^='product-'].single-product-page")
+    if not main_product:
+        main_product = soup.select_one("div[id^='product-']")
+
+    if not main_product:
+        return ""
+
+    price_box = main_product.select_one(
+        ".summary-inner p.price, "
+        ".summary p.price, "
+        ".entry-summary p.price, "
         "p.price"
     )
 
-    if price_box:
-        sale_price = price_box.select_one("ins .woocommerce-Price-amount")
+    if not price_box:
+        return ""
 
-        if sale_price:
-            sale_text = sale_price.get_text(" ", strip=True)
-            if "€" in sale_text:
-                return clean_eur_price(sale_text)
+    sale_price = price_box.select_one("ins .woocommerce-Price-amount")
 
-        all_amounts = price_box.select(".woocommerce-Price-amount")
+    if sale_price:
+        sale_text = sale_price.get_text(" ", strip=True)
+        if "€" in sale_text:
+            return clean_eur_price(sale_text)
 
-        normal_candidates = []
+    amounts = price_box.select(".woocommerce-Price-amount")
 
-        for amount in all_amounts:
-            parent_names = [p.name for p in amount.parents]
-            amount_text = amount.get_text(" ", strip=True)
+    for amount in amounts:
+        amount_text = amount.get_text(" ", strip=True)
 
-            if "€" not in amount_text:
-                continue
+        if "€" not in amount_text:
+            continue
 
-            # Пропуска стара цена в <del>
-            if amount.find_parent("del"):
-                continue
+        if amount.find_parent("del"):
+            continue
 
-            # Пропуска BGN amount-eur, когато е изписано като "(1.00 лв.)"
-            classes = amount.get("class", [])
-            if "amount-eur" in classes and "лв" in amount_text.lower():
-                continue
+        if "лв" in amount_text.lower():
+            continue
 
-            normal_candidates.append(amount_text)
+        return clean_eur_price(amount_text)
 
-        if normal_candidates:
-            return clean_eur_price(normal_candidates[0])
-
-    # Fallback към meta product price amount
-    meta_price = soup.select_one('meta[property="product:price:amount"], meta[itemprop="price"]')
-    if meta_price and meta_price.get("content"):
-        return clean_eur_price(meta_price.get("content"))
-
-    # Последен fallback към JSON-LD
-    offers = product_jsonld.get("offers") or {}
-
-    if isinstance(offers, list):
-        offers = offers[0] if offers else {}
-
-    json_price = offers.get("price", "")
-
-    return clean_eur_price(str(json_price))
+    return ""
 
 
 def uniq(seq):
