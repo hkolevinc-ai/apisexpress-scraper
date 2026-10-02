@@ -1,0 +1,18 @@
+{
+  "vat_rate": 0.20,
+  "vat_confirmed": false,
+  "default_stock": null,
+  "stock_by_sku": {},
+  "stock_by_site_id": {},
+  "brand_by_sku": {},
+  "manufacturer_by_brand": {},
+  "manufacturer_by_sku": {},
+  "responsible_by_brand": {},
+  "responsible_by_sku": {},
+  "audience_by_sku": {},
+  "product_type_by_sku": {},
+  "ean_by_sku": {},
+  "safety_by_sku": {},
+  "include_product_urls": [],
+  "exclude_product_urls": []
+}

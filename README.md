@@ -1,19 +1,70 @@
-# APIS Express → eMAG offer updates
+# APIS Express → eMAG „Други ученически аксесоари“
 
-This updates ONLY the existing offer rows in `template/emag_template.xlsx` (16 in the supplied file). It does not create offers for other APIS Express products; that requires a different eMAG listing template and matching account identifiers.
+Това е НОВ GitHub Actions workflow, който обхожда **всички** продуктови sitemap файлове на https://apisexpress.com/sitemap.xml и извлича целия продуктов каталог. След това подготвя оригиналния, предоставен от вас eMAG шаблон **Създаване на продукти — Други ученически аксесоари** само за продукти, които може да попадат в тази категория. Не можете да качите целия сайт с този ЕДИН eMAG шаблон, защото за другите категории eMAG изисква отделни файлове и характеристики.
 
-## GitHub setup
-1. Upload **the contents** of this ZIP into your GitHub repository, preserving `.github/workflows/scrape.yml` and `template/emag_template.xlsx` directories.
-2. Open **Actions → Update APIS Express eMAG offers → Run workflow**.
-3. Download artifact `apisexpress-emag-update` when completed. The workbook is `emag_price_stock_update.xlsx`; check `matching_report.csv` and `scrape_errors.csv` before importing.
-4. To update a different set of offers, replace `template/emag_template.xlsx` with a fresh export from your eMAG seller account.
+## Качване в GitHub (начинаещи)
 
-Runs manually and weekly on Mondays at 04:00 UTC. GitHub scheduling can be delayed.
+1. Създайте ново repository например `apisexpress-emag-create`, за да не смесвате двата стари workflow-а, които актуализират 16 оферти.
+2. Разархивирайте ZIP-а и качете папките **вътре**, включително скритата `.github`, както и `templates` и `tests` на правилните места. В главната директория трябва да са `emag_create.py`, `full_catalog.py`, `config.json`, `requirements.txt`, `README.md`. В `.github/workflows/` трябва да има `create-emag.yml`.
+3. Отворете **Actions → APIS to eMAG create products (school accessories) → Run workflow**. Скрейпърът се изпълнява в облака, компютърът ви може да е изключен.
+4. След приключване отворете изпълнението → **Artifacts** → `APIS-eMAG-create-school-accessories` и свалете ZIP-а.
 
-## Safety and price rules
-- Match by SKU or EAN only; never assume name similarity is a sufficient match.
-- Use explicitly EUR WooCommerce product summary price (discounted `ins` if present); compare with Store API if available. If values conflict, leave original price unchanged and flag in report.
-- Update stock only if the site exposes a precise numeric quantity or explicitly says out of stock. Generic "in stock" is not a numeric quantity; preserve template stock in that case.
-- Preserve eMAG identifiers, VAT, offer status, currency, and workbook structure.
-- This script does not automatically upload to eMAG.
-- Site selectors and Store API availability must be validated against current live pages; inspect matching_report before importing.
+Workflow-ът **не е настроен за автоматично седмично стартиране**, за да избегнем натрупването на нови чакащи изпълнения. Може да добавите график по-късно.
+
+## Изходни файлове
+
+- `APIS_full_catalog_for_eMAG_preparation.xlsx` — всички успешно извлечени продукти от сайта, включително тези за други категории; цените тук са **EUR с ДДС** от APIS.
+- `eMAG_school_accessories_DRAFT_DO_NOT_UPLOAD.xlsx` — оригиналният eMAG шаблон със съпоставените потенциални продукти. **НЕ КАЧВАЙТЕ ТОВА КАТО ГОТОВ ФАЙЛ.** Непотвърдените законови и задължителни полета остават празни.
+- `eMAG_school_accessories_READY_review_before_upload.xlsx` — генерира се САМО ако има редове с попълнени всички установени задължителни полета. И тогава е необходима финална проверка от продавача.
+- `school_accessories_review.csv` — за всеки потенциален артикул: източник, предложен тип, липсващи данни, оригинални изображения, цена с и без ДДС, наличност.
+- `other_categories_need_different_template.csv` — всички продукти от другите категории, за които трябва друг eMAG шаблон.
+- `scrape_errors.csv`, `coverage.json`, `emag_create.log` — отчет за грешки и пълнота.
+
+## Много важно: попълнете `config.json`
+
+Преди да получите надежден готов файл, потвърдете действителната ДДС ставка, наличностите във вашия склад и законовите данни за производителя/отговорното лице. Сайтът APIS може да показва „Наличен“ без да публикува реален брой и не е източник за наличността **във вашия собствен склад**.
+
+```json
+{
+  "vat_rate": 0.20,
+  "vat_confirmed": true,
+  "default_stock": null,
+  "stock_by_sku": {"ВАШИЯТ-SKU": 10},
+  "manufacturer_by_brand": {
+    "ВАШАТА-МАРКА": {
+      "name": "ПОТВЪРДЕНО юридическо име",
+      "address": "ПОТВЪРДЕН пощенски адрес",
+      "email": "ПОТВЪРДЕН имейл",
+      "eu_responsible_required": false
+    }
+  },
+  "audience_by_sku": {"ВАШИЯТ-SKU": "Момичета"}
+}
+```
+
+**Горното е пример, НЕ го копирайте като реални данни.** Включването на `vat_confirmed=true` е потвърждение от ваша страна, че ставката 20% действително се прилага към вашите оферти. eMAG очаква `sale_price` без ДДС и скрейпърът изчислява `брутна цена / (1 + ставка)` с точност 4 десетични знака. eMAG допуска в този шаблон `За` само „Момичета“ и „Момчета“ — за универсални продукти потвърдете с eMAG подходяща категория/стойност, вместо да измисляме характеристика.
+
+Можете да зададете допълнително:
+- `stock_by_site_id`, `brand_by_sku`, `manufacturer_by_sku`, `responsible_by_brand`, `responsible_by_sku`, `product_type_by_sku`, `ean_by_sku`, `safety_by_sku`, `include_product_urls`, `exclude_product_urls`.
+- При `manufacturer.*.eu_responsible_required=true` трябва да посочите и потвърдено отговорно лице с трите му полета.
+- Продуктите с вариации трябва да се проверят допълнително, понеже всяка вариация може да има отделна цена, SKU и снимки.
+
+## Ограничения и проверки
+
+- Използваме sitemap-ите за откриване на всички публични продукти; не можем да гарантираме, че в sitemap са включени скрити продукти.
+- Цена се извлича **само** от главния WooCommerce ценови блок (намалена от `<ins>`; иначе текуща EUR); не се взимат цени от навигация/свързани артикули или от BGN еквивалента.
+- Източникът може да предлага WEBP изображения, а този eMAG шаблон изброява JPG/PNG/GIF/JPEG. Такива записи изискват подготвен съвместим публичен URL. Не сменяйте на сляпо `.webp` с `.jpg`.
+- Нито EAN, нито количество, производител, лице в ЕС или информация за безопасност се измислят.
+- `url` в eMAG шаблона означава **собствения сайт на продавача**. APIS се съхранява в отчета и пълния каталог, не се представя за ваш сайт.
+- Без договорени права/доставка и проверка на изображението не публикувайте чужди продуктови описания или снимки.
+- Тестовете и валидациите проверяват формата на Excel, но не гарантират приемане от eMAG.
+
+## Локална проверка (по желание)
+
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests -v
+python emag_create.py
+```
+
+**Не променяйте** имената и подредбата на колоните на оригиналния eMAG шаблон. Скрейпърът спира при несъвпадение и запазва `Характеристики`, `Инструкции`, dropdown-ите и останалите листове.
