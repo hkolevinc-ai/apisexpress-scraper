@@ -1,0 +1,31 @@
+name: APIS to eMAG create products (school accessories)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  create_emag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install scraper requirements
+        run: pip install -r requirements.txt
+      - name: Validate category template and run offline tests
+        run: python -m unittest discover -s tests -v
+      - name: Scrape full APIS catalog and prepare eMAG category file
+        run: python emag_create.py
+        env:
+          WORKERS: '3'
+      - name: Upload Excel files and verification reports even if scraping was incomplete
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: APIS-eMAG-create-school-accessories
+          path: output/*
+          retention-days: 14
+          if-no-files-found: warn
