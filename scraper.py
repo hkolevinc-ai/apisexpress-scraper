@@ -1,540 +1,262 @@
-import re
+"""APIS Express -> existing eMAG offer price/stock update template.
+Does not create new offers. Matches only template SKUs/EANs, keeps all other fields.
+"""
+import csv
 import json
-import time
-import html as ihtml
 import logging
-from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
-from xml.etree import ElementTree as ET
+import re
+import time
+import xml.etree.ElementTree as ET
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
-import pandas as pd
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
 
-BASE_URL = "https://apisexpress.com"
-SITEMAP_INDEX = f"{BASE_URL}/sitemap.xml"
-OUTFILE = "apisexpress_all_products.xlsx"
-
-REQUEST_TIMEOUT = 30
-SLEEP_SECONDS = 0.15
-MAX_RETRIES = 3
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; APISExpressScraper/2.0; +https://github.com/)",
-    "Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-}
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-
+BASE = 'https://apisexpress.com'
+TEMPLATE = Path('template/emag_template.xlsx')
+OUTPUT = Path('output/emag_price_stock_update.xlsx')
+REPORT = Path('output/matching_report.csv')
+TIMEOUT = 30
+DELAY = 0.25
+HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; CatalogPriceUpdater/1.0)',
+           'Accept-Language': 'bg-BG,bg;q=0.9', 'Cache-Control': 'no-cache'}
 session = requests.Session()
 session.headers.update(HEADERS)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 
-def add_nocache(url: str) -> str:
-    parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query))
-    query["_nocache"] = str(int(time.time()))
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-
-def fetch(url: str, nocache: bool = False) -> str:
-    if nocache:
-        url = add_nocache(url)
-
-    last_error = None
-
-    for attempt in range(1, MAX_RETRIES + 1):
+def fetch(url):
+    for attempt in range(4):
         try:
-            r = session.get(url, timeout=REQUEST_TIMEOUT)
+            r = session.get(url, timeout=TIMEOUT)
             r.raise_for_status()
             return r.text
-        except Exception as e:
-            last_error = e
-            logging.warning("Fetch failed (%s/%s): %s -> %s", attempt, MAX_RETRIES, url, e)
-            time.sleep(1.5 * attempt)
-
-    raise RuntimeError(f"Could not fetch {url}: {last_error}")
+        except requests.RequestException:
+            if attempt == 3:
+                raise
+            time.sleep(2 ** attempt)
 
 
-def parse_xml_locs(xml_text: str) -> list[str]:
-    root = ET.fromstring(xml_text.encode("utf-8"))
-    locs = []
-
-    for elem in root.iter():
-        if elem.tag.endswith("loc") and elem.text:
-            locs.append(elem.text.strip())
-
-    return locs
+def locs(xml):
+    root = ET.fromstring(xml)
+    return [x.text.strip() for x in root.iter() if x.tag.endswith('loc') and x.text]
 
 
-def get_product_urls() -> list[str]:
-    logging.info("Reading sitemap index: %s", SITEMAP_INDEX)
-
-    index_xml = fetch(SITEMAP_INDEX)
-    sitemap_locs = parse_xml_locs(index_xml)
-
-    product_sitemaps = [
-        u for u in sitemap_locs
-        if re.search(r"/product-sitemap\d*\.xml$", u)
-    ]
-
-    logging.info("Found %s product sitemap(s): %s", len(product_sitemaps), ", ".join(product_sitemaps))
-
-    product_urls = []
-
-    for sm in product_sitemaps:
-        xml = fetch(sm)
-        urls = [u for u in parse_xml_locs(xml) if "/produkt/" in u]
-        logging.info("%s -> %s product URLs", sm, len(urls))
-        product_urls.extend(urls)
-        time.sleep(SLEEP_SECONDS)
-
-    seen = set()
-    unique = []
-
-    for u in product_urls:
-        if u not in seen:
-            seen.add(u)
-            unique.append(u)
-
-    logging.info("Total unique product URLs: %s", len(unique))
-    return unique
+def product_urls():
+    index = locs(fetch(BASE + '/sitemap.xml'))
+    maps = [u for u in index if re.search(r'/product-sitemap\d*\.xml(?:\?.*)?$', u)]
+    if not maps:
+        raise RuntimeError('No product sitemaps found; refusing to export unchanged data.')
+    urls = []
+    for sm in maps:
+        entries = [u for u in locs(fetch(sm)) if '/produkt/' in u]
+        logging.info('%s: %d URLs', sm, len(entries))
+        urls.extend(entries)
+    return list(dict.fromkeys(urls))
 
 
-def clean_text(value) -> str:
-    if value is None:
-        return ""
-
-    if isinstance(value, list):
-        value = " ".join(str(x) for x in value)
-
-    text = BeautifulSoup(str(value), "html.parser").get_text(" ", strip=True)
-    return re.sub(r"\s+", " ", ihtml.unescape(text)).strip()
+def text(el):
+    return el.get_text(' ', strip=True) if el else ''
 
 
-def clean_eur_price(text: str) -> str:
-    if not text:
-        return ""
-
-    text = ihtml.unescape(text)
-    text = text.replace("\xa0", " ")
-    text = text.replace("€", " ")
-    text = text.replace("лв.", " ")
-    text = text.replace("лв", " ")
-    text = text.replace("(", " ")
-    text = text.replace(")", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-
-    match = re.search(r"\d+(?:[.,]\d+)?", text)
-    return match.group(0).replace(",", ".") if match else ""
+def normalize_id(value):
+    return re.sub(r'[^\w]', '', str(value or '').casefold(), flags=re.UNICODE)
 
 
-def extract_price_eur(soup: BeautifulSoup, product_jsonld: dict) -> str:
-    """
-    Взима цената само от основния продукт.
-    Ако има намаление, взима намалената цена от <ins>.
-    """
-
-    main_product = soup.select_one("div[id^='product-'].single-product-page")
-    if not main_product:
-        main_product = soup.select_one("div[id^='product-']")
-
-    if not main_product:
-        return ""
-
-    price_box = main_product.select_one(
-        ".summary-inner p.price, "
-        ".summary p.price, "
-        ".entry-summary p.price, "
-        "p.price"
-    )
-
-    if not price_box:
-        return ""
-
-    sale_price = price_box.select_one("ins .woocommerce-Price-amount")
-
-    if sale_price:
-        sale_text = sale_price.get_text(" ", strip=True)
-        if "€" in sale_text:
-            return clean_eur_price(sale_text)
-
-    amounts = price_box.select(".woocommerce-Price-amount")
-
-    for amount in amounts:
-        amount_text = amount.get_text(" ", strip=True)
-
-        if "€" not in amount_text:
-            continue
-
-        if amount.find_parent("del"):
-            continue
-
-        if "лв" in amount_text.lower():
-            continue
-
-        return clean_eur_price(amount_text)
-
-    return ""
-
-
-def uniq(seq):
-    out = []
-    seen = set()
-
-    for x in seq:
-        if not x:
-            continue
-
-        x = x.strip()
-
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-
-    return out
-
-
-def normalize_image_url(url: str) -> str:
-    if not url:
-        return ""
-
-    url = ihtml.unescape(url).strip().split()[0]
-    url = urljoin(BASE_URL, url)
-
-    # Връща оригиналния upload вместо WordPress thumbnail размери
-    url = re.sub(r"-\d+x\d+(?=\.(?:jpg|jpeg|png|webp|gif)$)", "", url, flags=re.I)
-
-    return url
-
-
-def find_jsonld_objects(soup: BeautifulSoup):
-    objects = []
-
-    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-        raw = script.string or script.get_text("", strip=True)
-
-        if not raw:
-            continue
-
+def jsonld_products(soup):
+    products = []
+    for script in soup.select('script[type="application/ld+json"]'):
         try:
-            data = json.loads(ihtml.unescape(raw))
-        except Exception:
+            raw = json.loads(script.string or script.get_text())
+        except (ValueError, TypeError):
             continue
-
-        stack = [data]
-
+        stack = [raw]
         while stack:
-            item = stack.pop()
-
-            if isinstance(item, dict):
-                objects.append(item)
-
-                for v in item.values():
-                    if isinstance(v, (dict, list)):
-                        stack.append(v)
-
-            elif isinstance(item, list):
-                stack.extend(item)
-
-    return objects
+            obj = stack.pop()
+            if isinstance(obj, list):
+                stack.extend(obj)
+            elif isinstance(obj, dict):
+                types = obj.get('@type', [])
+                if isinstance(types, str):
+                    types = [types]
+                if 'Product' in types:
+                    products.append(obj)
+                stack.extend(v for v in obj.values() if isinstance(v, (list, dict)))
+    return products
 
 
-def type_matches(obj: dict, wanted: str) -> bool:
-    t = obj.get("@type")
+def parse_money(raw):
+    """Accept decimal numbers with comma/dot and thousands separators."""
+    s = re.sub(r'[^0-9,.]', '', str(raw or ''))
+    if not s:
+        return None
+    if ',' in s and '.' in s:
+        s = s.replace('.', '').replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
+    elif ',' in s:
+        s = s.replace(',', '.')
+    try:
+        value = Decimal(s)
+        return value if value > 0 else None
+    except InvalidOperation:
+        return None
 
-    if isinstance(t, list):
-        return wanted in t
 
-    return t == wanted
-
-
-def get_product_jsonld(objects):
-    for obj in objects:
-        if type_matches(obj, "Product"):
-            return obj
-
-    return {}
-
-
-def get_breadcrumb_categories(objects, product_name: str) -> str:
-    cats = []
-
-    for obj in objects:
-        if not type_matches(obj, "BreadcrumbList"):
+def eur_amounts(price_el):
+    result = []
+    if not price_el:
+        return result
+    for amount in price_el.select('.woocommerce-Price-amount'):
+        value = text(amount)
+        # Currency must be explicitly EUR; never silently convert BGN.
+        if '€' not in value and not re.search(r'\bEUR\b', value, re.I):
             continue
-
-        elements = obj.get("itemListElement") or []
-        names = []
-
-        for el in elements:
-            item = el.get("item") if isinstance(el, dict) else None
-            name = ""
-
-            if isinstance(item, dict):
-                name = item.get("name", "")
-            elif isinstance(el, dict):
-                name = el.get("name", "")
-
-            name = clean_text(name)
-
-            if name:
-                names.append(name)
-
-        for name in names:
-            low = name.lower()
-
-            if low in {"home", "начало", "магазин"}:
-                continue
-
-            if product_name and clean_text(product_name) and name == clean_text(product_name):
-                continue
-
-            if name not in cats:
-                cats.append(name)
-
-    return " | ".join(cats)
-
-
-def availability_bg(value: str, soup: BeautifulSoup) -> str:
-    text = (value or "").lower()
-    page_text = soup.get_text(" ", strip=True).lower()
-
-    product_div = soup.select_one("div[id^='product-']")
-    classes = " ".join(product_div.get("class", [])) if product_div else ""
-
-    if "outofstock" in text or "out-of-stock" in text or "out of stock" in text:
-        return "Не е наличен"
-
-    if "instock" in text or "in stock" in text:
-        return "Наличен"
-
-    if (
-        "в момента този артикул не е наличен" in page_text
-        or "изчерпан" in page_text
-        or "outofstock" in classes
-        or "out-of-stock" in classes
-    ):
-        return "Не е наличен"
-
-    if "instock" in classes or "in-stock" in classes:
-        return "Наличен"
-
-    return ""
-
-
-def parse_product(url: str) -> dict:
-    html = fetch(url, nocache=True)
-    soup = BeautifulSoup(html, "html.parser")
-
-    objects = find_jsonld_objects(soup)
-    product = get_product_jsonld(objects)
-
-    name = clean_text(product.get("name"))
-
-    if not name:
-        h1 = soup.select_one("h1.product_title, h1.entry-title, h1")
-        name = clean_text(h1.get_text(" ", strip=True) if h1 else "")
-
-    sku = clean_text(product.get("sku"))
-
-    if not sku:
-        sku_el = soup.select_one(".sku")
-        sku = clean_text(sku_el.get_text(" ", strip=True) if sku_el else "")
-
-    if not sku:
-        m = re.search(r'data-product_sku="([^"]*)"', html)
-        sku = clean_text(m.group(1)) if m else ""
-
-    description = clean_text(product.get("description"))
-
-    if not description:
-        desc_el = soup.select_one(
-            "#tab-description, "
-            ".woocommerce-product-details__short-description, "
-            ".product-short-description"
-        )
-        description = clean_text(desc_el.get_text(" ", strip=True) if desc_el else "")
-
-    if not description:
-        meta_desc = soup.select_one('meta[name="description"]')
-        description = clean_text(meta_desc.get("content", "") if meta_desc else "")
-
-    price = extract_price_eur(soup, product)
-
-    offers = product.get("offers") or {}
-
-    if isinstance(offers, list):
-        offers = offers[0] if offers else {}
-
-    availability = availability_bg(str(offers.get("availability", "")), soup)
-
-    categories = get_breadcrumb_categories(objects, name)
-
-    if not categories:
-        product_div = soup.select_one("div[id^='product-']")
-
-        if product_div:
-            slugs = [
-                c.replace("product_cat-", "")
-                for c in product_div.get("class", [])
-                if c.startswith("product_cat-")
-            ]
-            categories = " | ".join(slugs)
-
-    images = []
-
-    img_data = product.get("image")
-
-    if isinstance(img_data, str):
-        images.append(normalize_image_url(img_data))
-
-    elif isinstance(img_data, list):
-        for im in img_data:
-            if isinstance(im, str):
-                images.append(normalize_image_url(im))
-            elif isinstance(im, dict):
-                images.append(normalize_image_url(im.get("url") or im.get("contentUrl") or ""))
-
-    elif isinstance(img_data, dict):
-        images.append(normalize_image_url(img_data.get("url") or img_data.get("contentUrl") or ""))
-
-    for meta in soup.select('meta[property="og:image"], meta[property="og:image:secure_url"]'):
-        images.append(normalize_image_url(meta.get("content", "")))
-
-    for a in soup.select(".woocommerce-product-gallery a[href], .product-images a[href]"):
-        href = a.get("href", "")
-
-        if re.search(r"\.(jpg|jpeg|png|webp|gif)(\?|$)", href, re.I):
-            images.append(normalize_image_url(href))
-
-    for img in soup.select(".woocommerce-product-gallery img, .product-images img, img.wp-post-image"):
-        for attr in ["data-large_image", "data-src", "src"]:
-            images.append(normalize_image_url(img.get(attr, "")))
-
-        srcset = img.get("srcset", "")
-
-        for candidate in srcset.split(","):
-            candidate = candidate.strip()
-
-            if candidate:
-                images.append(normalize_image_url(candidate.split(" ")[0]))
-
-    images = [u for u in uniq(images) if "/wp-content/uploads/" in u]
-
-    row = {
-        "Код на продукт": sku,
-        "Име на продукт": name,
-        "Категория": categories,
-        "Цена в евро": price,
-        "Наличност": availability,
-        "Описание": description,
-        "URL": url,
-    }
-
-    for idx, image_url in enumerate(images, start=1):
-        row[f"Изображение {idx}"] = image_url
-
-    return row
-
-
-def save_xlsx(rows: list[dict], filename: str):
-    base_cols = [
-        "Код на продукт",
-        "Име на продукт",
-        "Категория",
-        "Цена в евро",
-        "Наличност",
-        "Описание",
-        "URL",
-    ]
-
-    max_img = 0
-
-    for r in rows:
-        for k in r.keys():
-            m = re.match(r"Изображение (\d+)$", k)
-
-            if m:
-                max_img = max(max_img, int(m.group(1)))
-
-    cols = base_cols + [f"Изображение {i}" for i in range(1, max_img + 1)]
-
-    df = pd.DataFrame(rows)
-
-    for c in cols:
-        if c not in df.columns:
-            df[c] = ""
-
-    df = df[cols]
-    df.to_excel(filename, index=False)
-
-    wb = load_workbook(filename)
-    ws = wb.active
-    ws.title = "Products"
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
-
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    widths = {
-        "A": 18,
-        "B": 55,
-        "C": 45,
-        "D": 12,
-        "E": 16,
-        "F": 70,
-        "G": 55,
-    }
-
-    for col_letter, width in widths.items():
-        ws.column_dimensions[col_letter].width = width
-
-    for col_idx in range(8, ws.max_column + 1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = 60
-
-    for row in ws.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-    wb.save(filename)
+        price = parse_money(value)
+        if price is not None:
+            result.append((amount, price))
+    return result
+
+
+def price_from_html(soup):
+    # Select the main product summary, never related products or cross-sells.
+    summary = soup.select_one('.single-product .summary-inner, .single-product .entry-summary, .single-product .summary, .product-main .summary')
+    if summary is None:
+        return None, 'missing_main_product_summary'
+    box = summary.select_one('p.price, div.price')
+    if box is None:
+        return None, 'missing_main_price'
+    amounts = eur_amounts(box)
+    sale = [p for el, p in amounts if el.find_parent('ins')]
+    if sale:
+        return sale[0], 'html_sale_eur'
+    regular = [p for el, p in amounts if not el.find_parent('del')]
+    if len(set(regular)) == 1:
+        return regular[0], 'html_eur'
+    return None, 'ambiguous_or_missing_eur_price'
+
+
+def price_from_store_api(slug):
+    try:
+        response = session.get(BASE + '/wp-json/wc/store/v1/products', params={'slug': slug}, timeout=TIMEOUT)
+        if response.status_code != 200:
+            return None
+        matches = response.json()
+        if not isinstance(matches, list) or len(matches) != 1:
+            return None
+        prices = matches[0].get('prices', {})
+        if prices.get('currency_code') != 'EUR':
+            return None
+        scale = Decimal(10) ** int(prices.get('currency_minor_unit', 2))
+        raw = prices.get('price')
+        return Decimal(str(raw)) / scale if raw not in (None, '') else None
+    except (requests.RequestException, ValueError, TypeError, InvalidOperation):
+        return None
+
+
+def extract(soup, url):
+    product = jsonld_products(soup)
+    data = product[0] if product else {}
+    sku_el = soup.select_one('.product_meta .sku, .sku_wrapper .sku')
+    sku = text(sku_el) or str(data.get('sku') or '')
+    eans = set()
+    for key in ('gtin', 'gtin8', 'gtin12', 'gtin13', 'gtin14', 'ean'):
+        if data.get(key):
+            eans.add(normalize_id(data[key]))
+    for item in soup.select('[itemprop="gtin13"], [itemprop="gtin"]'):
+        eans.add(normalize_id(item.get('content') or text(item)))
+    html_price, source = price_from_html(soup)
+    slug = urlparse(url).path.strip('/').split('/')[-1]
+    api_price = price_from_store_api(slug)
+    # If two independently retrieved live sources disagree, avoid a silent bad update.
+    if html_price is not None and api_price is not None and html_price != api_price:
+        price, source = None, f'PRICE_CONFLICT html={html_price} api={api_price}'
+    elif html_price is not None:
+        price = html_price
+    elif api_price is not None:
+        price, source = api_price, 'store_api_eur'
+    else:
+        price = None
+    stock = None
+    stock_el = soup.select_one('.single-product .stock')
+    stock_text = text(stock_el).lower()
+    stock_class = ' '.join(stock_el.get('class', [])) if stock_el else ''
+    if 'out-of-stock' in stock_class or 'outofstock' in stock_class or 'изчерпан' in stock_text:
+        stock = 0
+    elif stock_el:
+        match = re.search(r'(?:налични|наличност|in stock)\s*:?\s*(\d+)', stock_text)
+        if match:
+            stock = int(match.group(1))
+    # A generic "in stock" does NOT reveal exact stock quantity.
+    return {'sku': normalize_id(sku), 'eans': eans, 'price': price, 'price_source': source,
+            'stock': stock, 'url': url, 'name': text(soup.select_one('h1.product_title'))}
 
 
 def main():
-    product_urls = get_product_urls()
-
-    rows = []
+    wb = load_workbook(TEMPLATE)
+    ws = wb['оферти']
+    fields = {str(cell.value): cell.column for cell in ws[3] if cell.value}
+    required = ('part_number', 'ean', 'sale_price', 'stock', 'status', 'offer_currency')
+    if any(k not in fields for k in required):
+        raise RuntimeError('Template columns changed: ' + str(fields))
+    targets = {}
+    for row in range(6, ws.max_row + 1):
+        sku = normalize_id(ws.cell(row, fields['part_number']).value)
+        ean = normalize_id(ws.cell(row, fields['ean']).value)
+        if sku or ean:
+            targets[row] = {'sku': sku, 'ean': ean, 'matches': []}
+    logging.info('Existing offers: %d', len(targets))
+    urls = product_urls()
+    logging.info('Unique sitemap products: %d', len(urls))
+    if not urls:
+        raise RuntimeError('No product URLs')
     errors = []
-
-    for i, url in enumerate(product_urls, start=1):
-        logging.info("[%s/%s] %s", i, len(product_urls), url)
-
+    for i, url in enumerate(urls, 1):
         try:
-            rows.append(parse_product(url))
-        except Exception as e:
-            logging.exception("Failed product: %s", url)
-            errors.append({"URL": url, "Грешка": str(e)})
+            item = extract(BeautifulSoup(fetch(url), 'html.parser'), url)
+            for target in targets.values():
+                if (target['sku'] and target['sku'] == item['sku']) or (target['ean'] and target['ean'] in item['eans']):
+                    target['matches'].append(item)
+            if i % 100 == 0:
+                logging.info('Checked %d/%d products', i, len(urls))
+        except Exception as exc:
+            errors.append((url, str(exc)))
+            logging.warning('Failed %s: %s', url, exc)
+        time.sleep(DELAY)
+    OUTPUT.parent.mkdir(exist_ok=True)
+    report = []
+    for row, target in targets.items():
+        matches = target['matches']
+        status = 'not_found'
+        if len(matches) == 1:
+            item = matches[0]
+            if item['price'] is not None:
+                ws.cell(row, fields['sale_price']).value = float(item['price'])
+                status = 'price_updated'
+            else:
+                status = 'price_unverified'
+            if item['stock'] is not None:
+                ws.cell(row, fields['stock']).value = item['stock']
+                status += '_stock_updated'
+            # Keep original offer status, vendor ID, PNK, VAT, other protected fields.
+        elif len(matches) > 1:
+            status = 'ambiguous_multiple_matches'
+        report.append({'excel_row': row, 'sku': target['sku'], 'ean': target['ean'],
+                       'status': status, 'matched_urls': ' | '.join(m['url'] for m in matches),
+                       'price_sources': ' | '.join(m['price_source'] for m in matches)})
+    wb.save(OUTPUT)
+    with REPORT.open('w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=report[0].keys())
+        writer.writeheader()
+        writer.writerows(report)
+    with Path('output/scrape_errors.csv').open('w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(['url', 'error'])
+        writer.writerows(errors)
+    logging.info('Saved %s; matched %d/%d offers; fetch errors %d', OUTPUT,
+                 sum(bool(x['matches']) for x in targets.values()), len(targets), len(errors))
 
-        time.sleep(SLEEP_SECONDS)
 
-    save_xlsx(rows, OUTFILE)
-
-    logging.info("Saved %s with %s products. Errors: %s", OUTFILE, len(rows), len(errors))
-
-    if errors:
-        pd.DataFrame(errors).to_excel("apisexpress_errors.xlsx", index=False)
-        logging.info("Saved apisexpress_errors.xlsx")
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

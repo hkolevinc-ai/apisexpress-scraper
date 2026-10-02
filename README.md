@@ -1,63 +1,19 @@
-# ApisExpress scraper
+# APIS Express → eMAG offer updates
 
-Събира продукти от категорията **Ученически материали** в ApisExpress и генерира Excel файл с колоните:
+This updates ONLY the existing offer rows in `template/emag_template.xlsx` (16 in the supplied file). It does not create offers for other APIS Express products; that requires a different eMAG listing template and matching account identifiers.
 
-- Код на продукт
-- Име на продукт
-- Категория
-- Цена в евро
-- URL на всички изображения
-- Описание на продукта
-- URL на продукта
+## GitHub setup
+1. Upload **the contents** of this ZIP into your GitHub repository, preserving `.github/workflows/scrape.yml` and `template/emag_template.xlsx` directories.
+2. Open **Actions → Update APIS Express eMAG offers → Run workflow**.
+3. Download artifact `apisexpress-emag-update` when completed. The workbook is `emag_price_stock_update.xlsx`; check `matching_report.csv` and `scrape_errors.csv` before importing.
+4. To update a different set of offers, replace `template/emag_template.xlsx` with a fresh export from your eMAG seller account.
 
-## Автоматично изпълнение без локален компютър
+Runs manually and weekly on Mondays at 04:00 UTC. GitHub scheduling can be delayed.
 
-### Вариант A: GitHub Actions
-
-1. Създай private GitHub repository.
-2. Качи тези файлове в repository-то.
-3. Отиди в **Actions → Scrape ApisExpress catalog → Run workflow**.
-4. Скриптът ще се изпълнява автоматично всеки ден по cron и ще качва `apisexpress_products.xlsx` като artifact.
-
-### Вариант B: VPS + Docker
-
-```bash
-git clone <your-repo-url>
-cd apisexpress_scraper
-docker compose up --build
-```
-
-За автоматично ежедневно изпълнение на VPS:
-
-```bash
-crontab -e
-```
-
-Добави:
-
-```cron
-0 2 * * * cd /path/to/apisexpress_scraper && docker compose up --build --abort-on-container-exit
-```
-
-Файлът ще бъде записан в `./data/apisexpress_products.xlsx`.
-
-## Ръчно стартиране
-
-```bash
-pip install -r requirements.txt
-python scraper.py --output apisexpress_products.xlsx
-```
-
-## Настройки
-
-- Само HTML scraping:
-
-```bash
-python scraper.py --html-only --output apisexpress_products.xlsx
-```
-
-- Ограничение до първите 2 страници за тест:
-
-```bash
-python scraper.py --html-only --max-pages 2 --output test.xlsx
-```
+## Safety and price rules
+- Match by SKU or EAN only; never assume name similarity is a sufficient match.
+- Use explicitly EUR WooCommerce product summary price (discounted `ins` if present); compare with Store API if available. If values conflict, leave original price unchanged and flag in report.
+- Update stock only if the site exposes a precise numeric quantity or explicitly says out of stock. Generic "in stock" is not a numeric quantity; preserve template stock in that case.
+- Preserve eMAG identifiers, VAT, offer status, currency, and workbook structure.
+- This script does not automatically upload to eMAG.
+- Site selectors and Store API availability must be validated against current live pages; inspect matching_report before importing.
